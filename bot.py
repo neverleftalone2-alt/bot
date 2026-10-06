@@ -49,8 +49,15 @@ QTY_OPTIONS = [100, 500, 1000, 2000]
 
 # Pehli baar chalne par ye channels use hote hain (baad me /addchannel se badal sakte ho).
 DEFAULT_CHANNELS = {
-    "Channel m": "UCqhWyz6sw7V7YbxRJMfa_uQ",
-    "Channel Two": "UCyyyyyyyyyyyyyyyyyyyyyy",
+    
+    "Channel Advik": "UC0gAdHRqvfgBhTpp_TIbnvQ",
+    "Channel Divita": "UCA4XhK9qhBGeb403MH1uU6g",
+    "Channel Careless": "UCjZ4BWgz7Mw0yHKErpmD-Gg",
+    "Channel Modely": "UCqhWyz6sw7V7YbxRJMfa_uQ",
+    "Channel POS": "UCv-3ZuJ6T60telXYgIrFAHA",
+    "Channel PAPA": "UC6bg27SVxkBLB-LrvVmXsdg",
+    "Channel Againthar": "UC1jSSmPwCE9i6_KaBGEVjuA",
+    "Channel Shrija": "UCLhR0my_0QAmR2mLWXCm2eA",
 }
 # ----------------------------------------
 

@@ -1,7 +1,28 @@
+"""
+Telegram bot -> channel list -> channel select -> latest YouTube video
+-> TNT SMM panel par Like order.
 
+Environment variables:
+    BOT_TOKEN        @BotFather se
+    SMM_API_URL      panel ka API URL (jaise https://<panel>/api/v2)
+    SMM_API_KEY      panel ki API key
+    LIKE_SERVICE_ID  panel ki services list se YouTube Likes ka ID
+    ADMIN_IDS        comma separated Telegram user IDs (zaroori)
+    DATA_DIR         (optional) jaha channels.json / orders.json save ho.
+                     Railway par Volume lagao to ye path do, e.g. /data
+
+Commands:
+    /start                      channel list
+    /channels                   saved channels dekho
+    /addchannel <id|@handle|url> [naam]
+    /removechannel              channel hatao
+    /balance                    panel balance
+    /status <order_id>          order status
+"""
 import json
 import logging
 import os
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -14,22 +35,38 @@ log = logging.getLogger("smmbot")
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-SMM_API_URL = os.environ["SMM_API_URL"]          # e.g. https://<panel-domain>/api/v2
+SMM_API_URL = os.environ["SMM_API_URL"]
 SMM_API_KEY = os.environ["SMM_API_KEY"]
 LIKE_SERVICE_ID = os.environ["LIKE_SERVICE_ID"]
 ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()}
 
+DATA_DIR = Path(os.environ.get("DATA_DIR", "."))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+CHANNELS_FILE = DATA_DIR / "channels.json"
+ORDERS_FILE = DATA_DIR / "orders.json"
+
 QTY_OPTIONS = [100, 500, 1000, 2000]
 
-# Yaha apne YouTube channels daalo: "Display name": "UC... channel ID"
-CHANNELS = {
-    "Channel Model": "UCqhWyz6sw7V7YbxRJMfa_uQ",
+# Pehli baar chalne par ye channels use hote hain (baad me /addchannel se badal sakte ho).
+DEFAULT_CHANNELS = {
+    "Channel M": "UCqhWyz6sw7V7YbxRJMfa_uQ",
     "Channel Two": "UCyyyyyyyyyyyyyyyyyyyyyy",
 }
-CHANNEL_NAMES = list(CHANNELS.keys())
-
-ORDERS_FILE = Path("orders.json")  # duplicate order se bachne ke liye log
 # ----------------------------------------
+
+NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
+ID_RE = re.compile(r"UC[\w-]{22}")
+
+
+# ---------- storage ----------
+def load_channels() -> dict:
+    if CHANNELS_FILE.exists():
+        return json.loads(CHANNELS_FILE.read_text())
+    return dict(DEFAULT_CHANNELS)
+
+
+def save_channels(ch: dict) -> None:
+    CHANNELS_FILE.write_text(json.dumps(ch, indent=2, ensure_ascii=False))
 
 
 def load_orders() -> dict:
@@ -45,32 +82,62 @@ def save_order(video_id: str, qty: int, order_id) -> None:
 
 
 def is_admin(update: Update) -> bool:
-    uid = update.effective_user.id if update.effective_user else None
-    return not ADMIN_IDS or uid in ADMIN_IDS
+    user = update.effective_user
+    return bool(user and user.id in ADMIN_IDS)
 
 
-async def get_latest_video(channel_id: str) -> dict | None:
-    """YouTube RSS feed se latest video (API key ki zarurat nahi)."""
+# ---------- YouTube ----------
+async def fetch_feed(channel_id: str) -> ET.Element:
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
         r = await c.get(url)
         r.raise_for_status()
-    ns = {
-        "a": "http://www.w3.org/2005/Atom",
-        "yt": "http://www.youtube.com/xml/schemas/2015",
-    }
-    entry = ET.fromstring(r.text).find("a:entry", ns)
+    return ET.fromstring(r.text)
+
+
+async def get_latest_video(channel_id: str) -> dict | None:
+    root = await fetch_feed(channel_id)
+    entry = root.find("a:entry", NS)
     if entry is None:
         return None
-    vid = entry.find("yt:videoId", ns).text
+    vid = entry.find("yt:videoId", NS).text
     return {
         "id": vid,
-        "title": entry.find("a:title", ns).text,
+        "title": entry.find("a:title", NS).text,
         "link": f"https://www.youtube.com/watch?v={vid}",
-        "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
     }
 
 
+async def get_channel_title(channel_id: str) -> str | None:
+    root = await fetch_feed(channel_id)
+    t = root.find("a:title", NS)
+    return t.text if t is not None else None
+
+
+async def resolve_channel_id(text: str) -> str | None:
+    """UC ID, /channel/UC... URL, @handle ya channel URL se channel ID nikalo."""
+    text = text.strip()
+    m = ID_RE.search(text)
+    if m:
+        return m.group(0)
+    if text.startswith("@"):
+        url = f"https://www.youtube.com/{text}"
+    elif text.startswith("http"):
+        url = text
+    else:
+        return None
+    async with httpx.AsyncClient(
+        timeout=20,
+        follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"},
+        cookies={"CONSENT": "YES+1"},
+    ) as c:
+        r = await c.get(url)
+    m = re.search(r'"channelId":"(UC[\w-]{22})"', r.text) or re.search(r"channel_id=(UC[\w-]{22})", r.text)
+    return m.group(1) if m else None
+
+
+# ---------- SMM panel ----------
 async def smm_request(**params) -> dict:
     payload = {"key": SMM_API_KEY, **params}
     async with httpx.AsyncClient(timeout=30) as c:
@@ -79,23 +146,105 @@ async def smm_request(**params) -> dict:
         return r.json()
 
 
-# ---------------- HANDLERS ----------------
+# ---------- keyboards ----------
 def channel_keyboard() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(n, callback_data=f"ch:{i}")] for i, n in enumerate(CHANNEL_NAMES)]
+    names = list(load_channels().keys())
+    rows = [[InlineKeyboardButton(n, callback_data=f"ch:{i}")] for i, n in enumerate(names)]
     return InlineKeyboardMarkup(rows)
 
 
+# ---------- handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
-        return await update.message.reply_text("⛔ Aap authorized nahi ho.")
+        return await update.message.reply_text(
+            f"⛔ Aap authorized nahi ho.\nAapki Telegram ID: {update.effective_user.id}"
+        )
+    if not load_channels():
+        return await update.message.reply_text("Koi channel nahi hai. /addchannel se jodo.")
     await update.message.reply_text("📺 Channel select karo:", reply_markup=channel_keyboard())
+
+
+async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    ch = load_channels()
+    if not ch:
+        return await update.message.reply_text("Koi channel nahi hai.")
+    await update.message.reply_text("\n".join(f"• {n}: {cid}" for n, cid in ch.items()))
+
+
+async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if not context.args:
+        return await update.message.reply_text(
+            "Use: /addchannel <UC-ID | @handle | channel URL> [naam]\n"
+            "Example: /addchannel @MrBeast Mera Channel"
+        )
+    try:
+        cid = await resolve_channel_id(context.args[0])
+        if not cid:
+            return await update.message.reply_text(
+                "❌ Channel ID nahi mili. Seedha UC... wali ID bhejo."
+            )
+        name = " ".join(context.args[1:]).strip() or await get_channel_title(cid) or cid
+    except Exception as e:
+        log.exception("add_channel error")
+        return await update.message.reply_text(f"❌ Error: {e}")
+
+    ch = load_channels()
+    ch[name] = cid
+    save_channels(ch)
+    await update.message.reply_text(f"✅ Added: {name}\n🆔 {cid}")
+
+
+async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    names = list(load_channels().keys())
+    if not names:
+        return await update.message.reply_text("Koi channel nahi hai.")
+    rows = [[InlineKeyboardButton(f"🗑 {n}", callback_data=f"del:{i}")] for i, n in enumerate(names)]
+    await update.message.reply_text("Kaunsa channel hatana hai?", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def on_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(update):
+        return
+    idx = int(q.data.split(":")[1])
+    ch = load_channels()
+    names = list(ch.keys())
+    if idx >= len(names):
+        return await q.edit_message_text("❌ Channel list badal chuki hai, dobara try karo.")
+    removed = names[idx]
+    del ch[removed]
+    save_channels(ch)
+    await q.edit_message_text(f"🗑 Removed: {removed}")
 
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
-    res = await smm_request(action="balance")
+    try:
+        res = await smm_request(action="balance")
+    except Exception as e:
+        return await update.message.reply_text(f"❌ API error: {e}")
     await update.message.reply_text(f"💰 Balance: {res.get('balance')} {res.get('currency', '')}")
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if not context.args:
+        return await update.message.reply_text("Use: /status <order_id>")
+    try:
+        res = await smm_request(action="status", order=context.args[0])
+    except Exception as e:
+        return await update.message.reply_text(f"❌ API error: {e}")
+    text = "\n".join(f"{k}: {v}" for k, v in res.items()) if isinstance(res, dict) else str(res)
+    await update.message.reply_text(text)
 
 
 async def on_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -103,9 +252,14 @@ async def on_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     if not is_admin(update):
         return
-    name = CHANNEL_NAMES[int(q.data.split(":")[1])]
+    ch = load_channels()
+    names = list(ch.keys())
+    idx = int(q.data.split(":")[1])
+    if idx >= len(names):
+        return await q.edit_message_text("❌ Channel list badal chuki hai, /start dobara bhejo.")
+    name = names[idx]
     try:
-        video = await get_latest_video(CHANNELS[name])
+        video = await get_latest_video(ch[name])
     except Exception as e:
         log.exception("RSS error")
         return await q.edit_message_text(f"❌ Video fetch nahi hua: {e}")
@@ -118,9 +272,8 @@ async def on_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton(f"👍 {n}", callback_data=f"qty:{video['id']}:{n}")] for n in QTY_OPTIONS]
     kb.append([InlineKeyboardButton("⬅️ Back", callback_data="back")])
     await q.edit_message_text(
-        f"📺 *{name}*\n🎬 {video['title']}\n🔗 {video['link']}{note}\n\nKitne likes chahiye?",
+        f"📺 {name}\n🎬 {video['title']}\n🔗 {video['link']}{note}\n\nKitne likes chahiye?",
         reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown",
     )
 
 
@@ -154,41 +307,39 @@ async def on_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.exception("SMM error")
         return await q.edit_message_text(f"❌ API error: {e}")
 
-    if "order" in res:
+    if isinstance(res, dict) and "order" in res:
         save_order(vid, int(qty), res["order"])
         await q.edit_message_text(
             f"✅ Order placed!\n🆔 Order ID: {res['order']}\n👍 {qty} likes\n🔗 {link}\n\n"
             f"Status ke liye: /status {res['order']}"
         )
     else:
-        await q.edit_message_text(f"❌ Panel error: {res.get('error', res)}")
+        err = res.get("error", res) if isinstance(res, dict) else res
+        await q.edit_message_text(f"❌ Panel error: {err}")
 
 
 async def on_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    if not is_admin(update):
+        return
     await q.edit_message_text("📺 Channel select karo:", reply_markup=channel_keyboard())
 
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    if not context.args:
-        return await update.message.reply_text("Use: /status <order_id>")
-    res = await smm_request(action="status", order=context.args[0])
-    await update.message.reply_text(
-        "\n".join(f"{k}: {v}" for k, v in res.items()) if isinstance(res, dict) else str(res)
-    )
-
-
 def main():
+    if not ADMIN_IDS:
+        log.warning("ADMIN_IDS khali hai - koi bhi bot use nahi kar payega. ADMIN_IDS set karo.")
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("channels", list_channels))
+    app.add_handler(CommandHandler("addchannel", add_channel))
+    app.add_handler(CommandHandler("removechannel", remove_channel))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CallbackQueryHandler(on_channel, pattern=r"^ch:"))
     app.add_handler(CallbackQueryHandler(on_qty, pattern=r"^qty:"))
     app.add_handler(CallbackQueryHandler(on_confirm, pattern=r"^ok:"))
+    app.add_handler(CallbackQueryHandler(on_delete, pattern=r"^del:"))
     app.add_handler(CallbackQueryHandler(on_back, pattern=r"^back$"))
     log.info("Bot started")
     app.run_polling()

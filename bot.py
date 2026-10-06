@@ -23,7 +23,7 @@ QTY_OPTIONS = [100, 500, 1000, 2000]
 
 # Yaha apne YouTube channels daalo: "Display name": "UC... channel ID"
 CHANNELS = {
-    "Channel One": "UCxxxxxxxxxxxxxxxxxxxxxx",
+    "Channel Model": "UCqhWyz6sw7V7YbxRJMfa_uQ",
     "Channel Two": "UCyyyyyyyyyyyyyyyyyyyyyy",
 }
 CHANNEL_NAMES = list(CHANNELS.keys())

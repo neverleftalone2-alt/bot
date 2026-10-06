@@ -34,10 +34,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("smmbot")
 
 # ---------------- CONFIG ----------------
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-SMM_API_URL = os.environ["SMM_API_URL"]
-SMM_API_KEY = os.environ["SMM_API_KEY"]
-LIKE_SERVICE_ID = os.environ["LIKE_SERVICE_ID"]
+BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
+SMM_API_URL = os.environ["SMM_API_URL"].strip()
+SMM_API_KEY = os.environ["SMM_API_KEY"].strip()
+LIKE_SERVICE_ID = os.environ["LIKE_SERVICE_ID"].strip()
 ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()}
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "."))
@@ -49,7 +49,7 @@ QTY_OPTIONS = [100, 500, 1000, 2000]
 
 # Pehli baar chalne par ye channels use hote hain (baad me /addchannel se badal sakte ho).
 DEFAULT_CHANNELS = {
-    "Channel M": "UCqhWyz6sw7V7YbxRJMfa_uQ",
+    "Channel m": "UCqhWyz6sw7V7YbxRJMfa_uQ",
     "Channel Two": "UCyyyyyyyyyyyyyyyyyyyyyy",
 }
 # ----------------------------------------

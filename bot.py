@@ -14,6 +14,9 @@ Environment variables:
     DATA_DIR         (optional) jaha channels.json / orders.json save ho.
                      Railway par Volume lagao to ye path do, e.g. /data
 
+Direct link: koi bhi YouTube video link (watch / youtu.be / shorts / live)
+bot ko bhejo, seedha service + quantity choose karke order lag jayega.
+
 Commands:
     /start                      channel list
     /channels                   saved channels dekho
@@ -31,7 +34,14 @@ from pathlib import Path
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("smmbot")
@@ -71,6 +81,7 @@ DEFAULT_CHANNELS = {
 
 NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
 ID_RE = re.compile(r"UC[\w-]{22}")
+VIDEO_RE = re.compile(r"(?:v=|youtu\.be/|shorts/|live/|embed/)([\w-]{11})")
 BROWSER_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"}
 
 
@@ -153,6 +164,18 @@ async def get_latest_video(channel_id: str) -> dict | None:
         "title": entry.find("a:title", NS).text,
         "link": f"https://www.youtube.com/watch?v={vid}",
     }
+
+
+async def get_video_title(video_id: str) -> str | None:
+    """oEmbed se video ka title (fail ho to None)."""
+    url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+    try:
+        async with httpx.AsyncClient(timeout=15, headers=BROWSER_HEADERS) as c:
+            r = await c.get(url)
+            r.raise_for_status()
+            return r.json().get("title")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def get_channel_title(channel_id: str) -> str | None:
@@ -342,6 +365,39 @@ async def on_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def on_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User ne seedha YouTube link bheja -> order flow shuru."""
+    if not update.message or not update.message.text:
+        return
+    if not is_admin(update):
+        return
+    m = VIDEO_RE.search(update.message.text)
+    if not m:
+        if "youtu" in update.message.text.lower():
+            await update.message.reply_text("❌ Video link samajh nahi aaya. Poora video link bhejo.")
+        return
+    vid = m.group(1)
+    title = await get_video_title(vid) or "(title nahi mila)"
+
+    already = load_orders().get(vid)
+    note = f"\n⚠️ Is video par pehle {len(already)} order lag chuka hai." if already else ""
+
+    if len(SERVICES) > 1:
+        kb = [
+            [InlineKeyboardButton(f"⚙️ {sname}", callback_data=f"svc:{vid}:{i}")]
+            for i, (sname, _) in enumerate(SERVICES)
+        ]
+        prompt = "Kaunsi service se order lagana hai?"
+    else:
+        kb = qty_buttons(vid, 0)
+        prompt = "Kitne likes chahiye?"
+    kb.append([InlineKeyboardButton("⬅️ Back", callback_data="back")])
+    await update.message.reply_text(
+        f"🎬 {title}\n🔗 https://www.youtube.com/watch?v={vid}{note}\n\n{prompt}",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
 async def on_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -420,6 +476,7 @@ def main():
     app.add_handler(CommandHandler("removechannel", remove_channel))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_link))
     app.add_handler(CallbackQueryHandler(on_channel, pattern=r"^ch:"))
     app.add_handler(CallbackQueryHandler(on_service, pattern=r"^svc:"))
     app.add_handler(CallbackQueryHandler(on_qty, pattern=r"^qty:"))

@@ -7,6 +7,9 @@ Environment variables:
     SMM_API_URL      panel ka API URL (jaise https://<panel>/api/v2)
     SMM_API_KEY      panel ki API key
     LIKE_SERVICE_ID  panel ki services list se YouTube Likes ka ID
+    LIKE_SERVICE_NAME    (optional) button par dikhne wala naam, e.g. "Fast Likes"
+    LIKE_SERVICE_ID_2    (optional) doosri Likes service ka ID
+    LIKE_SERVICE_NAME_2  (optional) doosri service ka naam, e.g. "Premium Likes"
     ADMIN_IDS        comma separated Telegram user IDs (zaroori)
     DATA_DIR         (optional) jaha channels.json / orders.json save ho.
                      Railway par Volume lagao to ye path do, e.g. /data
@@ -38,6 +41,12 @@ BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 SMM_API_URL = os.environ["SMM_API_URL"].strip()
 SMM_API_KEY = os.environ["SMM_API_KEY"].strip()
 LIKE_SERVICE_ID = os.environ["LIKE_SERVICE_ID"].strip()
+
+# Likes services: list of (naam, service_id)
+SERVICES = [(os.environ.get("LIKE_SERVICE_NAME", "Service 1").strip(), LIKE_SERVICE_ID)]
+_sid2 = os.environ.get("LIKE_SERVICE_ID_2", "").strip()
+if _sid2:
+    SERVICES.append((os.environ.get("LIKE_SERVICE_NAME_2", "Service 2").strip(), _sid2))
 ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()}
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "."))
@@ -82,9 +91,9 @@ def load_orders() -> dict:
     return {}
 
 
-def save_order(video_id: str, qty: int, order_id) -> None:
+def save_order(video_id: str, qty: int, order_id, service: str = "") -> None:
     data = load_orders()
-    data.setdefault(video_id, []).append({"qty": qty, "order_id": order_id})
+    data.setdefault(video_id, []).append({"qty": qty, "order_id": order_id, "service": service})
     ORDERS_FILE.write_text(json.dumps(data, indent=2))
 
 
@@ -192,6 +201,13 @@ def channel_keyboard() -> InlineKeyboardMarkup:
     names = list(load_channels().keys())
     rows = [[InlineKeyboardButton(n, callback_data=f"ch:{i}")] for i, n in enumerate(names)]
     return InlineKeyboardMarkup(rows)
+
+
+def qty_buttons(vid: str, sidx: int) -> list:
+    return [
+        [InlineKeyboardButton(f"👍 {n}", callback_data=f"qty:{vid}:{sidx}:{n}")]
+        for n in QTY_OPTIONS
+    ]
 
 
 # ---------- handlers ----------
@@ -310,10 +326,35 @@ async def on_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     already = load_orders().get(video["id"])
     note = f"\n⚠️ Is video par pehle {len(already)} order lag chuka hai." if already else ""
 
-    kb = [[InlineKeyboardButton(f"👍 {n}", callback_data=f"qty:{video['id']}:{n}")] for n in QTY_OPTIONS]
+    if len(SERVICES) > 1:
+        kb = [
+            [InlineKeyboardButton(f"⚙️ {sname}", callback_data=f"svc:{video['id']}:{i}")]
+            for i, (sname, _) in enumerate(SERVICES)
+        ]
+        prompt = "Kaunsi service se order lagana hai?"
+    else:
+        kb = qty_buttons(video["id"], 0)
+        prompt = "Kitne likes chahiye?"
     kb.append([InlineKeyboardButton("⬅️ Back", callback_data="back")])
     await q.edit_message_text(
-        f"📺 {name}\n🎬 {video['title']}\n🔗 {video['link']}{note}\n\nKitne likes chahiye?",
+        f"📺 {name}\n🎬 {video['title']}\n🔗 {video['link']}{note}\n\n{prompt}",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def on_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(update):
+        return
+    _, vid, sidx = q.data.split(":")
+    sidx = int(sidx)
+    if sidx >= len(SERVICES):
+        return await q.edit_message_text("❌ Service nahi mili, /start dobara bhejo.")
+    kb = qty_buttons(vid, sidx)
+    kb.append([InlineKeyboardButton("⬅️ Back", callback_data="back")])
+    await q.edit_message_text(
+        f"⚙️ Service: {SERVICES[sidx][0]}\n🔗 https://www.youtube.com/watch?v={vid}\n\nKitne likes chahiye?",
         reply_markup=InlineKeyboardMarkup(kb),
     )
 
@@ -323,13 +364,14 @@ async def on_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     if not is_admin(update):
         return
-    _, vid, qty = q.data.split(":")
+    _, vid, sidx, qty = q.data.split(":")
+    sname = SERVICES[int(sidx)][0]
     kb = [[
-        InlineKeyboardButton("✅ Confirm", callback_data=f"ok:{vid}:{qty}"),
+        InlineKeyboardButton("✅ Confirm", callback_data=f"ok:{vid}:{sidx}:{qty}"),
         InlineKeyboardButton("❌ Cancel", callback_data="back"),
     ]]
     await q.edit_message_text(
-        f"Confirm karo:\n🔗 https://www.youtube.com/watch?v={vid}\n👍 Likes: {qty}",
+        f"Confirm karo:\n🔗 https://www.youtube.com/watch?v={vid}\n⚙️ Service: {sname}\n👍 Likes: {qty}",
         reply_markup=InlineKeyboardMarkup(kb),
     )
 
@@ -339,19 +381,20 @@ async def on_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     if not is_admin(update):
         return
-    _, vid, qty = q.data.split(":")
+    _, vid, sidx, qty = q.data.split(":")
+    sname, service_id = SERVICES[int(sidx)]
     link = f"https://www.youtube.com/watch?v={vid}"
     await q.edit_message_text("⏳ Order laga raha hoon...")
     try:
-        res = await smm_request(action="add", service=LIKE_SERVICE_ID, link=link, quantity=qty)
+        res = await smm_request(action="add", service=service_id, link=link, quantity=qty)
     except Exception as e:
         log.exception("SMM error")
         return await q.edit_message_text(f"❌ API error: {e}")
 
     if isinstance(res, dict) and "order" in res:
-        save_order(vid, int(qty), res["order"])
+        save_order(vid, int(qty), res["order"], f"{sname} ({service_id})")
         await q.edit_message_text(
-            f"✅ Order placed!\n🆔 Order ID: {res['order']}\n👍 {qty} likes\n🔗 {link}\n\n"
+            f"✅ Order placed!\n🆔 Order ID: {res['order']}\n⚙️ {sname}\n👍 {qty} likes\n🔗 {link}\n\n"
             f"Status ke liye: /status {res['order']}"
         )
     else:
@@ -378,6 +421,7 @@ def main():
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CallbackQueryHandler(on_channel, pattern=r"^ch:"))
+    app.add_handler(CallbackQueryHandler(on_service, pattern=r"^svc:"))
     app.add_handler(CallbackQueryHandler(on_qty, pattern=r"^qty:"))
     app.add_handler(CallbackQueryHandler(on_confirm, pattern=r"^ok:"))
     app.add_handler(CallbackQueryHandler(on_delete, pattern=r"^del:"))

@@ -49,7 +49,6 @@ QTY_OPTIONS = [100, 500, 1000, 2000]
 
 # Pehli baar chalne par ye channels use hote hain (baad me /addchannel se badal sakte ho).
 DEFAULT_CHANNELS = {
-    
     "Channel Advik": "UC0gAdHRqvfgBhTpp_TIbnvQ",
     "Channel Divita": "UCA4XhK9qhBGeb403MH1uU6g",
     "Channel Careless": "UCjZ4BWgz7Mw0yHKErpmD-Gg",
@@ -63,6 +62,7 @@ DEFAULT_CHANNELS = {
 
 NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
 ID_RE = re.compile(r"UC[\w-]{22}")
+BROWSER_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"}
 
 
 # ---------- storage ----------
@@ -95,18 +95,49 @@ def is_admin(update: Update) -> bool:
 
 # ---------- YouTube ----------
 async def fetch_feed(channel_id: str) -> ET.Element:
-    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
+    """Pehle channel feed, 404 aaye to uploads-playlist feed try karo."""
+    urls = [
+        f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}",
+        f"https://www.youtube.com/feeds/videos.xml?playlist_id=UU{channel_id[2:]}",
+    ]
+    last_err = None
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=BROWSER_HEADERS) as c:
+        for url in urls:
+            try:
+                r = await c.get(url)
+                r.raise_for_status()
+                return ET.fromstring(r.text)
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+    raise last_err
+
+
+async def scrape_latest_video(channel_id: str) -> dict | None:
+    """Last fallback: channel ke /videos page se latest video ID nikalo."""
+    url = f"https://www.youtube.com/channel/{channel_id}/videos"
+    async with httpx.AsyncClient(
+        timeout=20, follow_redirects=True, headers=BROWSER_HEADERS, cookies={"CONSENT": "YES+1"}
+    ) as c:
         r = await c.get(url)
         r.raise_for_status()
-    return ET.fromstring(r.text)
+    m = re.search(r'"videoId":"([\w-]{11})"', r.text)
+    if not m:
+        return None
+    vid = m.group(1)
+    t = re.search(r'"title":\{"runs":\[\{"text":"(.*?)"\}', r.text)
+    title = t.group(1) if t else "Latest video"
+    return {"id": vid, "title": title, "link": f"https://www.youtube.com/watch?v={vid}"}
 
 
 async def get_latest_video(channel_id: str) -> dict | None:
-    root = await fetch_feed(channel_id)
+    try:
+        root = await fetch_feed(channel_id)
+    except Exception:
+        log.warning("RSS feeds fail hue, page scrape try kar raha hoon")
+        return await scrape_latest_video(channel_id)
     entry = root.find("a:entry", NS)
     if entry is None:
-        return None
+        return await scrape_latest_video(channel_id)
     vid = entry.find("yt:videoId", NS).text
     return {
         "id": vid,
@@ -116,7 +147,10 @@ async def get_latest_video(channel_id: str) -> dict | None:
 
 
 async def get_channel_title(channel_id: str) -> str | None:
-    root = await fetch_feed(channel_id)
+    try:
+        root = await fetch_feed(channel_id)
+    except Exception:
+        return None
     t = root.find("a:title", NS)
     return t.text if t is not None else None
 
